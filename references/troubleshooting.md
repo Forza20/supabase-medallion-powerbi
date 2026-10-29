@@ -63,6 +63,7 @@ Grouped by phase. Each entry was hit in a real build.
 | Card shows "1tusind" / "20tusind" for counts | Auto display units on a count | `labelDisplayUnits '1'`, `labelPrecision 0L` (`tmdl-templates.md` → *Formatting defaults*) |
 | Card value cut off at the top; measure name repeated under the value | `cardVisual` label shown below the value in a low card | `label.show = false` (the title names the KPI), `layout.paddingUniform = 0D` |
 | Text card ends in "…" | Text measure too long for the card | Shorten the measure (≈ 35 characters at 14 pt in 300 px) |
+| Bar data labels show full numbers (74.374.711) although display units are set to millions | `labels.labelDisplayUnits` given as a quoted string (`'1000000'`) – data labels expect a number | `"Value": "1000000D"` on `labels`; cards use the quoted form |
 | Bars in alphabetical order | No `sortDefinition` – the category is the default sort | `sortDefinition` on the measure, `Descending`, `isDefaultSort: true` |
 | Axis titles show column names (`category`, `team`) on bar charts | `showAxisTitle` defaults to on | `showAxisTitle: false` on both axes; let the visual title name them |
 

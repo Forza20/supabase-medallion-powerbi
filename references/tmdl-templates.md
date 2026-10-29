@@ -625,10 +625,14 @@ millions, no axis titles:
   "valueAxis":    [ { "properties": { "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } },
                                       "labelDisplayUnits": { "expr": { "Literal": { "Value": "'1000000'" } } } } } ],
   "labels":       [ { "properties": { "show": { "expr": { "Literal": { "Value": "true" } } },
-                                      "labelDisplayUnits": { "expr": { "Literal": { "Value": "'1000000'" } } },
+                                      "labelDisplayUnits": { "expr": { "Literal": { "Value": "1000000D" } } },
                                       "labelPrecision": { "expr": { "Literal": { "Value": "1L" } } } } } ]
 }
 ```
+
+Mind the literal type: data labels on bar/column charts take a **number** (`1000000D`). With the quoted
+string form (`'1000000'`), which works on card values, they ignore the setting and show full numbers
+(74.374.711).
 
 **Line charts** – same axis settings without data labels. The visual title should say what the axis
 shows ("Net revenue per month (complete months only)").
