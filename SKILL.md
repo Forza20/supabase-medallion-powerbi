@@ -4,7 +4,10 @@ description: >
   Build an end-to-end analytics pipeline from raw CSV files to a Power BI report: a bronze/silver/gold
   (medallion) data warehouse in Supabase Postgres, a star schema in the gold layer, a read-only Power BI
   login with working RLS, and a Power BI Project (PBIP) with a TMDL semantic model, date table and measure
-  table. Use this skill whenever the user wants to load CSV or Excel exports into Supabase or Postgres and
+  table. It runs a structured decision interview with the user, backed by queries on their own data,
+  so the modelling choices that change headline numbers (historical costs, missing dates, source
+  conflicts, incomplete periods, non-additive counts, repo exposure) are made deliberately and logged.
+  Use this skill whenever the user wants to load CSV or Excel exports into Supabase or Postgres and
   report on them in Power BI, mentions bronze/silver/gold or medallion architecture, star schema, fact and
   dimension tables, PBIP, TMDL, connecting Power BI to Supabase, or is stuck on Supabase-to-Power BI errors
   (certificate errors, empty tables, pooler login, TMDL load errors) — even if they don't say "medallion".
@@ -21,16 +24,45 @@ so follow the phases in order and run the checks at the end of each one. Every p
 verifiable (row counts, zero-error checks, a refreshed model), which is how you avoid debugging three
 layers at once later.
 
+## Working with the user: the decision interview
+
+The mechanics below are the same for every dataset; the decisions are not. Whether margin uses
+today's cost or the cost at the time of sale, whether a missing date may be derived, which system wins
+when two sources disagree – these change headline numbers, and only the user knows what the numbers
+are for. So the skill interviews the user at four points, using evidence from their own data:
+
+| Round | When | Typical decisions |
+|---|---|---|
+| 1 | Before building | Purpose and audience, grain, business keys, dimension history, refresh cadence |
+| 2 | After silver | Historical prices on facts, missing dates, source conflicts, unknown members, duplicates |
+| 3 | After gold, before the report | Non-additive counts, incomplete edge periods, "current month", units, unsupported KPIs |
+| 4 | Before hand-over | Repo visibility and identifiers, passwords and access, documentation |
+
+**Read `references/decision-interview.md` before Round 1.** It holds the protocol and a question bank
+with detection SQL. The short version:
+
+- Investigate first, then ask – never ask what a query can answer; skip questions whose detection finds
+  nothing (log them as "not applicable – checked").
+- **One question per message**, with the evidence in numbers, 2–4 lettered options, and your
+  recommendation and why. Wait for the answer before the next question.
+- Log every decision in `docs/model-decisions.md` and implement each round's decisions together, then
+  rerun the quality checks.
+- If the user says "use your recommendations for the rest", do so, but still log each decision and
+  list them in the hand-over.
+
 ## Phase 0 – Understand the sources and agree the model
 
-Before writing any SQL, profile every CSV (header, row count, sample rows, obvious data-quality issues)
-and agree these with the user, because they drive every later decision:
+Before writing any SQL, profile every CSV (header, row count, sample rows, obvious data-quality issues),
+then run **interview Round 1**. These answers drive every later decision:
 
+- **Purpose and audience** – demo/reference, reusable template or production. It decides how much
+  automation, history and hardening is worth building.
 - **Grain of each fact table** – e.g. "one row per order line (order number + product)".
 - **Business keys** and how sources join (watch for key formats that differ between systems, such as
   `AW-00011000` vs `AW00011000` vs `NASAW00011000`; silver must normalise them).
 - **Facts vs dimensions**, and **cardinality** of every relationship (should be many-to-one from fact).
-- **History**: are dimension rows versioned (start/end dates)? Usually gold keeps current rows only.
+- **History**: are dimension rows versioned (start/end dates)? Decide the policy now; values that change
+  over time (cost, price) are handled in Round 2.
 
 Propose the star schema (tables, columns, PK/FK) and get approval. A DBML diagram for
 https://dbdiagram.io is a quick way to show it.
@@ -70,6 +102,11 @@ Give the procedure `set search_path = ''` and schema-qualify every table name. S
 advisor flags procedures with a mutable search path, and the fixed path removes a class of
 search-path hijacking.
 
+When silver loads, run **interview Round 2**: check for versioned prices/costs, missing or invalid
+dates, conflicting values between sources, unknown members and duplicates, and put each finding to the
+user. The fixes (point-in-time values, derived dates with a flag, master-source rules) land in silver
+and gold, so decide them before building gold.
+
 ## Phase 3 – Gold (star schema)
 
 Build the dimensions and facts as **tables filled by `gold.load_gold()`**, not as views. Views
@@ -93,6 +130,11 @@ Run checks that return **0 on success** so a glance tells you the state (templat
 
 Report known, accepted exceptions explicitly (e.g. "19 order lines have an invalid source date"), and
 tell the user how they will show up in the report (in totals, missing from date-based visuals).
+
+Then run **interview Round 3** on the gold data, before any visual is built: do breakdowns of distinct
+counts add up to the total, are the first and last periods complete (and is the last one plausible,
+not a truncated extract), what counts as the "current" month, which units to show, and which requested
+KPIs the data cannot support.
 
 ## Phase 5 – Security for Power BI
 
@@ -174,9 +216,11 @@ A PBIP project is text, which makes it reviewable and diffable. Structure and te
 
 ## Phase 9 – Hand-over
 
-Finish with:
+Run **interview Round 4** first: is the repository public, and do committed files contain the project
+ref, pooler host or `<role>.<project-ref>` user names; who holds the password; who reads the guide.
+Then finish with:
 
-1. Expected row counts and key totals (so the user can verify a refresh).
+1. Expected row counts and key totals (so the user can verify a refresh), and the decision log.
 2. Refresh procedure: load new CSVs into bronze → `call silver.load_silver(); call gold.load_gold();`
    → Refresh in Power BI. Offer `pg_cron` for scheduled loads (template in the SQL reference).
 3. Commit migrations, tests and the PBIP to Git; make sure `.pbi/localSettings.json` and
@@ -196,7 +240,10 @@ tiles, full disks). Two general rules:
 
 ## Reference files
 
-- `references/sql-templates.md` – bronze, load, silver, gold, quality checks, security, pg_cron.
-- `references/tmdl-templates.md` – PBIP layout, parameters, partitions, date table, measure table,
-  measures, relationships, minimal report.
+- `references/decision-interview.md` – interview protocol, decision-log template and question bank
+  (with detection SQL) for all four rounds. Read before Round 1.
+- `references/sql-templates.md` – bronze, load, silver, gold (incl. point-in-time values and derived
+  dates), quality checks, security, pg_cron.
+- `references/tmdl-templates.md` – PBIP layout, parameters, partitions, date table (incl. complete-month
+  flag), measure table, measures, relationships, minimal report.
 - `references/troubleshooting.md` – error → cause → fix.

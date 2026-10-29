@@ -8,6 +8,7 @@ report – without the day of debugging in between.**
 This skill guides your coding agent through a complete, proven analytics build:
 
 1. **Profiles your CSV files** and agrees the star schema with you (grain, keys, facts vs dimensions).
+   Then it interviews you about the purpose and shape of the project (see below).
 2. **Builds a medallion warehouse in Supabase Postgres**
    - *Bronze*: raw, replayable copies of every file.
    - *Silver*: one load procedure that trims, standardises codes, deduplicates, parses dates and repairs
@@ -21,6 +22,24 @@ This skill guides your coding agent through a complete, proven analytics build:
    generated date table, inactive relationships and a measure table (revenue, margin, YTD, YoY,
    latest-complete-month cards, top-N text).
 7. **Hands over** row counts, a refresh procedure, optional `pg_cron` scheduling and a clean Git commit.
+
+## It interviews you – about your data
+
+A pipeline is easy to copy; the decisions behind the numbers are not. At four points (before building,
+after silver, after gold, before hand-over) the skill **grills you**, one question at a time, about the
+choices that change headline figures in *your* data:
+
+- Should margin use today's cost or the cost at the time of sale?
+- May missing dates be derived – and is there a pattern in your data that proves it?
+- Which system wins when CRM and ERP disagree?
+- Do category breakdowns of order counts add up to the total – and how should they be labelled?
+- Are the first and last months complete, or will the trend chart show a fake collapse?
+- Does the public repo reveal your project ref, host and user names?
+
+Before each question it runs queries on your data and shows the evidence (rows affected, share of
+revenue, how much a KPI moves), offers lettered options and recommends one. You answer with a letter or
+"your recommendation". Every decision goes into a decision log in your project, so anyone can see why
+the numbers are what they are. Questions that don't apply to your data are skipped.
 
 ## Why it saves time
 
@@ -55,10 +74,12 @@ Analysts, BI developers and consultants who want a real warehouse behind their P
 
 ```
 supabase-medallion-powerbi/
-├── SKILL.md                       # the workflow, phase by phase, with checks
+├── SKILL.md                       # the workflow, phase by phase, with checks and interview rounds
 ├── README.md                      # this description
 └── references/
-    ├── sql-templates.md           # bronze, loading, silver, gold, quality checks, security, pg_cron
+    ├── decision-interview.md      # interview protocol, decision log, question bank with detection SQL
+    ├── sql-templates.md           # bronze, loading, silver, gold, point-in-time values, derived dates,
+    │                              # quality checks, security, pg_cron
     ├── tmdl-templates.md          # PBIP layout, parameters, partitions, date table, measures, report
     └── troubleshooting.md         # every error we hit, with cause and fix
 ```

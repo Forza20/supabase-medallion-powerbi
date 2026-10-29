@@ -9,7 +9,9 @@ with the user's sources. Every block is safe to rerun.
 3. Loading bronze
 4. Silver procedure
 5. Gold star schema + load procedure
-6. Quality checks
+   - Point-in-time value (e.g. unit cost at the order date)
+   - Derived date with flag
+6. Quality checks (incl. source-conflict info check)
 7. Security (read-only role, RLS)
 8. Scheduling with pg_cron
 
@@ -244,6 +246,64 @@ $$;
 
 Run with `call gold.load_gold();`. If a gold table is read by a role that gets RLS, see section 7.
 
+### Point-in-time value (e.g. unit cost at the order date)
+
+Use when a dimension attribute is versioned (decision R2-1, option C). Add `unit_cost integer` to
+`gold.fact_sales` and fill it in the fact insert. The lateral lookup picks the version that started
+most recently on or before the order date; if the order predates every version (a gap), it takes the
+first version.
+
+```sql
+insert into gold.fact_sales (order_number, product_key, customer_key, order_date, shipping_date,
+                             due_date, sales_amount, quantity, price, unit_cost)
+select s.sls_ord_num, p.product_key, c.customer_key,
+       s.sls_order_dt, s.sls_ship_dt, s.sls_due_dt,
+       s.sls_sales, s.sls_quantity, s.sls_price,
+       v.prd_cost
+from silver.crm_sales s
+left join gold.dim_products  p on p.product_number = s.sls_prd_key
+left join gold.dim_customers c on c.customer_id    = s.sls_cust_id
+left join lateral (
+    select h.prd_cost
+    from silver.crm_products h
+    where h.prd_key = s.sls_prd_key
+    order by (h.prd_start_dt <= s.sls_order_dt) desc,                              -- versions in effect first
+             case when h.prd_start_dt <= s.sls_order_dt then h.prd_start_dt end desc nulls last,
+             h.prd_start_dt asc                                                    -- gap: first version
+    limit 1
+) v on true;
+```
+
+Derive missing order dates first (next template): a row with a NULL order date falls through to the
+first version. Tested on a 60k-line sales set: every line got a cost, and margin moved from 39.8%
+(current cost) to 42.2% (point-in-time).
+
+Margin then becomes `SUMX ( fact_sales, fact_sales[sales_amount] - fact_sales[quantity] * fact_sales[unit_cost] )`.
+Before switching, show the user margin with current vs point-in-time cost – the difference is the
+evidence for the decision.
+
+### Derived date with flag
+
+Use when a date is missing but recoverable (decision R2-2, option B). In silver, after parsing:
+
+```sql
+-- 1) prove the pattern first: the lag must be constant (or near-constant) on all complete rows
+select min(sls_ship_dt - sls_order_dt), max(sls_ship_dt - sls_order_dt)
+from silver.crm_sales where sls_order_dt is not null and sls_ship_dt is not null;
+
+-- 2) fill: sibling lines in the same order first, then the proven lag; flag every derived value
+update silver.crm_sales s
+set sls_order_dt = coalesce(
+        (select max(t.sls_order_dt) from silver.crm_sales t
+         where t.sls_ord_num = s.sls_ord_num and t.sls_order_dt is not null),
+        s.sls_ship_dt - 7),                -- replace 7 with the proven lag
+    sls_order_dt_derived = true
+where s.sls_order_dt is null;
+```
+
+Add `sls_order_dt_derived boolean not null default false` to the silver table and carry it to gold as
+`order_date_derived`, so derived rows can be filtered or shown.
+
 ## 6. Quality checks (expect 0 everywhere)
 
 ```sql
@@ -267,6 +327,12 @@ from silver.crm_sales where sls_order_dt > sls_ship_dt or sls_order_dt > sls_due
 union all
 select 'info: fact rows without order_date', count(*)
 from gold.fact_sales where order_date is null;
+
+-- Info: conflicts between sources for the same attribute (decision R2-3); not an error, but tracked
+select 'info: gender differs between CRM and ERP' as check_name, count(*) as rows
+from silver.crm_customers c
+join silver.erp_customers e on e.cid = c.cst_key
+where c.cst_gndr <> 'n/a' and e.gen <> 'n/a' and c.cst_gndr <> e.gen;
 
 -- Distinct values of standardised columns
 select 'gender' as col, string_agg(distinct gender, ', ') from gold.dim_customers

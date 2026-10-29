@@ -270,6 +270,36 @@ table dim_date
 	annotation PBI_ResultType = Table
 ```
 
+### Complete-month flag
+
+Decision R3-2, option B. Add to the date table so time visuals can show complete months only while
+totals keep every row. Add these steps before `in` in the `dim_date` partition (and reference the last
+step after `in`):
+
+```
+					DataStart = List.Min(List.RemoveNulls(fact_sales[order_date])),
+					DataEnd = List.Max(List.RemoveNulls(fact_sales[order_date])),
+					Complete = Table.AddColumn(MonthStart, "is_complete_month", each Date.StartOfMonth([date_key]) >= DataStart and Date.EndOfMonth([date_key]) <= DataEnd, type logical)
+```
+
+and the column:
+
+```
+	column is_complete_month
+		dataType: boolean
+		lineageTag: 00000000-0000-0000-0000-000000000026
+		summarizeBy: none
+		sourceColumn: is_complete_month
+
+		annotation SummarizationSetBy = Automatic
+```
+
+Filter trend visuals (or the page) on `dim_date[is_complete_month] = TRUE`. In PBIR that is a visual
+filter in the visual's `filterConfig`; validate it with the report tool. The rule only affects the
+edges: the first month is complete only if data starts on its 1st, the last month only if data runs
+to its last day. It does not detect an incomplete extract inside a full calendar month – that is a
+separate check in decision R3-2.
+
 ## 7. Relationships (active and inactive)
 
 No `///` descriptions in this file – relationships do not support them.
@@ -315,8 +345,9 @@ table _Measures
 		displayFolder: Customers
 		lineageTag: 00000000-0000-0000-0000-000000000043
 
-	/// Unit cost from the product dimension times quantity.
-	measure Cost = SUMX ( fact_sales, fact_sales[quantity] * RELATED ( dim_products[cost] ) )
+	/// Point-in-time unit cost stored on the fact (decision R2-1, option C).
+	/// If the user chose current cost instead: SUMX ( fact_sales, fact_sales[quantity] * RELATED ( dim_products[cost] ) )
+	measure Cost = SUMX ( fact_sales, fact_sales[quantity] * fact_sales[unit_cost] )
 		formatString: #,0
 		displayFolder: Sales
 		lineageTag: 00000000-0000-0000-0000-000000000044
