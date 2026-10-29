@@ -34,6 +34,9 @@ choices that change headline figures in *your* data:
 - Which system wins when CRM and ERP disagree?
 - Do category breakdowns of order counts add up to the total – and how should they be labelled?
 - Are the first and last months complete, or will the trend chart show a fake collapse?
+- Which order statuses count as revenue – or are cancelled and returned orders inflating it?
+- When a customer has three sales reps, who gets the credit – without counting the revenue three times?
+- Which duplicate wins when there is no timestamp, and what happens to negative amounts and spikes?
 - Does the public repo reveal your project ref, host and user names?
 
 Before each question it runs queries on your data and shows the evidence (rows affected, share of
@@ -55,6 +58,9 @@ them and fixes them up front:
 - Reports crashing on open because they have **no base theme**.
 - Dark KPI tiles rendering **white** because of the card visual's inner fill.
 - "This month vs last month" cards showing a fake drop because the **data ends mid-month**.
+- **Many-to-many joins** (customer ↔ sales rep) inflating rep totals – handled with an allocated bridge.
+- **No psql or Python** on the machine – a token-protected upload endpoint that is removed after the load.
+- Cards showing **"1tusind"**, cut-off values and alphabetical bars – formatting defaults applied up front.
 
 A full error → cause → fix table is included.
 
@@ -67,8 +73,9 @@ Analysts, BI developers and consultants who want a real warehouse behind their P
 
 - A Supabase project (SQL Editor and Table Editor, or the Supabase MCP server for your agent).
 - Power BI Desktop on Windows.
-- Optional: `psql` for scripted loads; a PBIR tool such as the `powerbi-report-author` CLI (Node.js)
-  for validating and previewing report pages.
+- Optional: `psql` for scripted loads (without it: `curl`, included with Git for Windows); a PBIR tool
+  such as the `powerbi-report-author` CLI (Node.js) for validating and previewing report pages
+  (without it: a PowerShell reference check).
 
 ## What's included
 

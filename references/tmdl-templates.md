@@ -10,9 +10,11 @@ with a freshly generated GUID (PowerShell: `[guid]::NewGuid()`, bash: `uuidgen`)
 4. Model file (model.tmdl)
 5. Import table (dimension or fact)
 6. Date table generated in Power Query
-7. Relationships (active and inactive)
-8. Measure table and measures
+7. Relationships (active and inactive, bridge)
+8. Measure table and measures (incl. status-based revenue, bridge measures)
 9. Minimal report with theme
+10. Formatting defaults for visuals
+11. Validation without Node
 
 ---
 
@@ -323,6 +325,21 @@ relationship fact_sales_shipping_date_dim_date
 	toColumn: dim_date.date_key
 ```
 
+**Bridge (many-to-many).** Both bridge relationships are ordinary many-to-one, single direction:
+`dim_rep` filters the bridge, `dim_customer` filters the bridge and the fact. Keep them single
+direction; the measures below move the filter from bridge to fact explicitly, so no bidirectional
+filter (and no ambiguous path to the fact or target tables) is needed.
+
+```
+relationship 00000000-0000-0000-0000-000000000033
+	fromColumn: bridge_customer_rep.customer_key
+	toColumn: dim_customers.customer_key
+
+relationship 00000000-0000-0000-0000-000000000034
+	fromColumn: bridge_customer_rep.rep_key
+	toColumn: dim_reps.rep_key
+```
+
 ## 8. Measure table and measures
 
 ```
@@ -446,6 +463,75 @@ table _Measures
 
 Do not name a DAX variable `LastDate` – it collides with the `LASTDATE` function.
 
+### Status-based revenue (decision R3-7)
+
+Put the status rule in the base measure, so every other measure (YTD, MoM, margin, targets) inherits it:
+
+```
+	/// Revenue of completed and shipped orders with a valid amount.
+	measure 'Net Revenue' = CALCULATE ( SUM ( fact_orders[revenue] ), fact_orders[status] IN { "Completed", "Shipped" } )
+		formatString: #,0
+		displayFolder: Sales
+		lineageTag: 00000000-0000-0000-0000-000000000060
+
+	measure 'Open Orders Value' = CALCULATE ( SUM ( fact_orders[revenue] ), fact_orders[status] = "Pending" )
+		formatString: #,0
+		displayFolder: Sales
+		lineageTag: 00000000-0000-0000-0000-000000000061
+
+	/// All statuses incl. cancelled/returned. An order value, not revenue – never label it "revenue".
+	measure 'Order Value (all statuses)' = SUM ( fact_orders[revenue] )
+		formatString: #,0
+		displayFolder: Sales
+		lineageTag: 00000000-0000-0000-0000-000000000062
+```
+
+### Bridge measures (decision R3-6)
+
+```
+	/// Each customer's revenue split 1/n over its reps. Sums correctly across reps.
+	measure 'Allocated Revenue' =
+			SUMX (
+			    bridge_customer_rep,
+			    VAR _c = bridge_customer_rep[customer_key]
+			    RETURN
+			        bridge_customer_rep[allocation] * CALCULATE ( [Net Revenue], KEEPFILTERS ( dim_customers[customer_key] = _c ) )
+			)
+		formatString: #,0
+		displayFolder: Reps
+		lineageTag: 00000000-0000-0000-0000-000000000063
+
+	/// Full credit to every rep ("my customers' revenue"). Correct per rep, never sum across reps.
+	measure 'Revenue of Rep Customers' =
+			SUMX (
+			    bridge_customer_rep,
+			    VAR _c = bridge_customer_rep[customer_key]
+			    RETURN
+			        CALCULATE ( [Net Revenue], KEEPFILTERS ( dim_customers[customer_key] = _c ) )
+			)
+		formatString: #,0
+		displayFolder: Reps
+		lineageTag: 00000000-0000-0000-0000-000000000064
+```
+
+`KEEPFILTERS` keeps customer slicers (segment, region) working inside the iteration.
+
+### Complete months without a visual filter
+
+Instead of a PBIR `filterConfig`, a measure can blank incomplete months – simpler to write by hand and
+it works in any visual. Store the flag as `int64` (1/0), because `MIN` over a boolean column is not
+allowed:
+
+```
+	measure 'Net Revenue (complete months)' = IF ( MIN ( dim_date[is_complete_month] ) = 1, [Net Revenue] )
+		formatString: #,0
+		displayFolder: Time Intelligence
+		lineageTag: 00000000-0000-0000-0000-000000000065
+```
+
+Keep text measures for cards short (about 35 characters at 14 pt in a 300 px card), e.g.
+`"-1.4% vs. Apr 2025 (5.55 mio.)"`. Longer labels are cut off.
+
 ## 9. Minimal report with theme
 
 `<Name>.Report/report.json` – one empty page plus a base theme. The theme file must exist at
@@ -496,3 +582,78 @@ Container background alone is not enough; the card's inner tile covers it. Add t
   }
 ]
 ```
+
+## 10. Formatting defaults for visuals
+
+Apply these when the visual is created. Without them a first render showed "1tusind" customers,
+values cut off at the top of 112 px cards, the measure name repeated under every value, bars in
+alphabetical order and axis titles such as `month_start`.
+
+**Cards (`cardVisual`)** – title names the KPI, so hide the label; set units explicitly
+(`'1'` = none, `'1000'` = thousands, `'1000000'` = millions); precision as `<n>L`:
+
+```json
+"objects": {
+  "value": [ { "properties": {
+      "fontSize":          { "expr": { "Literal": { "Value": "28D" } } },
+      "bold":              { "expr": { "Literal": { "Value": "true" } } },
+      "labelDisplayUnits": { "expr": { "Literal": { "Value": "'1000000'" } } },
+      "labelPrecision":    { "expr": { "Literal": { "Value": "1L" } } }
+    }, "selector": { "id": "default" } } ],
+  "label":  [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } }, "selector": { "id": "default" } } ],
+  "layout": [ { "properties": { "paddingUniform": { "expr": { "Literal": { "Value": "0D" } } } }, "selector": { "id": "default" } } ]
+}
+```
+
+Counts and percentages: `labelDisplayUnits '1'`, precision `0L` (counts) or `1L` (percent, with the
+measure's `0.0%` format). Amounts: millions with 1–2 decimals.
+
+**Bar and column charts** – sort by the measure (in `query`, next to `queryState`), data labels in
+millions, no axis titles:
+
+```json
+"query": {
+  "queryState": { ... },
+  "sortDefinition": {
+    "sort": [ { "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "_Measures" } }, "Property": "Net Revenue" } },
+                "direction": "Descending" } ],
+    "isDefaultSort": true
+  }
+},
+"objects": {
+  "categoryAxis": [ { "properties": { "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } } } } ],
+  "valueAxis":    [ { "properties": { "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } },
+                                      "labelDisplayUnits": { "expr": { "Literal": { "Value": "'1000000'" } } } } } ],
+  "labels":       [ { "properties": { "show": { "expr": { "Literal": { "Value": "true" } } },
+                                      "labelDisplayUnits": { "expr": { "Literal": { "Value": "'1000000'" } } },
+                                      "labelPrecision": { "expr": { "Literal": { "Value": "1L" } } } } } ]
+}
+```
+
+**Line charts** – same axis settings without data labels. The visual title should say what the axis
+shows ("Net revenue per month (complete months only)").
+
+## 11. Validation without Node
+
+When no PBIR tool can run, check at least that every file parses and that every field a visual uses
+exists in the model (PowerShell):
+
+```powershell
+$p = '<project folder>'
+Get-ChildItem $p -Recurse -Include *.json,*.pbip,*.pbir,*.pbism,.platform -File |
+  ForEach-Object { try { Get-Content $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null } catch { "INVALID: $($_.FullName)" } }
+
+$defs = @{}
+Get-ChildItem "$p\<Name>.SemanticModel\definition\tables" -Filter *.tmdl | ForEach-Object {
+  $t = $_.BaseName
+  foreach ($line in Get-Content $_.FullName -Encoding UTF8) {
+    if ($line -match "^\t(column|measure) ('([^']+)'|([^\s=]+))") {
+      $n = if ($matches[3]) { $matches[3] } else { $matches[4] }; $defs["$t.$n"] = 1 } } }
+$vis  = Get-ChildItem "$p\<Name>.Report" -Recurse -Filter visual.json | ForEach-Object { Get-Content $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json }
+$refs = $vis | ForEach-Object { $_.visual.query.queryState.PSObject.Properties.Value.projections.queryRef }
+$refs | Where-Object { -not $defs.ContainsKey($_) }     # must print nothing
+```
+
+Also check for duplicate `lineageTag` values and for lines indented with spaces
+(`grep -rn '^ ' <definition>` → nothing). This catches broken references, not layout problems – ask the
+user for a screenshot of every page.

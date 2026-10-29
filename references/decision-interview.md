@@ -22,6 +22,8 @@ trustworthy.
 
 1. **Investigate before you ask.** If the data or the code can answer part of the question, run the
    query first (detection SQL is given per question). Never ask the user something you could look up.
+   Measure claims from the source's own documentation too, and show both numbers when they differ
+   ("the data dictionary says ~12 %; measured: 75 %").
 2. **Skip what does not apply.** If detection finds nothing (no versioned attributes, no missing dates),
    record "not applicable – checked" in the decision log and move on without asking.
 3. **One question per message.** Wait for the answer before asking the next one. Later questions often
@@ -109,6 +111,15 @@ always asked).
 - Options: manual (`call` procedures + Refresh) · `pg_cron` nightly · external orchestrator.
 - Recommend manual for A, `pg_cron` for B/C.
 
+**R1-6 Schema names.** Ask only when the project already has schemas this build would reuse.
+- Detect: `select nspname from pg_namespace where nspname in ('bronze', 'silver', 'gold') or nspname like '%\_bronze';`
+  then check which tables and Power BI models read them.
+- Options: A prefixed schemas for this model (`<prefix>_bronze/_silver/_gold`) · B a new Supabase
+  project (may cost money beyond the free tier) · C reuse the existing schemas (overwrites the other
+  model – only if the user says it is obsolete).
+- Recommend A. Use the prefix consistently in migrations, procedures, policies and the PBIP source
+  queries.
+
 ### Round 2 – after silver (ask when detection finds something)
 
 **R2-1 Historical prices/costs on versioned dimensions.** Using today's cost for old sales misstates
@@ -140,14 +151,44 @@ YTD/YoY, while still counting in totals.
 
 **R2-4 Unknown members.** NULL vs `'n/a'` vs an "Unknown" dimension row.
 - Detect: share of NULL/blank per attribute and per foreign key.
-- Options: `'n/a'` text in attributes · unknown member row (key -1) for missing foreign keys · leave NULL.
-- Recommend `'n/a'` for attributes and an unknown member when fact foreign keys can be missing, so
-  totals always reconcile.
+- Options: `'n/a'` text in attributes · unknown member row (key -1) for missing foreign keys ·
+  inferred member per missing id (`is_inferred = true`) · leave NULL.
+- Recommend `'n/a'` for attributes. For fact keys: an unknown member (-1) when the key itself is NULL;
+  an inferred member per id when the fact carries an id the dimension lacks (e.g. 2,015 orders → 299
+  customer ids). One "Unknown" row would turn 299 customers into 1 and break distinct counts.
+  Template: `sql-templates.md` → *Inferred members*.
 
 **R2-5 Duplicates.** Which row wins when a key repeats.
 - Detect: duplicate count per business key in bronze.
-- Options: latest by created/modified date · first · reject and report.
-- Recommend latest, with the dropped count reported.
+- Classify first: identical rows · same key with another date · same key with another amount. Check
+  whether the other attributes (customer, product) agree – if they always do, the rows are versions of
+  one record, not different records sharing a key.
+- Options: latest by created/modified date · highest quality score, then first source line (when there
+  is no timestamp) · first · reject and report.
+- Recommend latest when a timestamp exists; otherwise the quality score (one point per passed check –
+  valid date, valid amount, ship ≥ order). In a test dataset this picked the valid version of
+  date-shifted duplicates: "ship before order" fell from 251 rows to 3. Report the dropped count per
+  type. Template: `sql-templates.md` → *Dedupe by quality score*.
+
+**R2-6 Amount anomalies and impossible dates.** Negative amounts, spikes and future dates silently
+move totals and trends.
+- Detect:
+  ```sql
+  select count(*) filter (where amount < 0)                                   as negative,
+         count(*) filter (where quantity > 0 and amount > 5 * quantity * price) as spike_5x,
+         count(*) filter (where amount = 0 and status = 'Completed')           as zero_on_completed,
+         count(*) filter (where amount is null)                                as missing,
+         count(*) filter (where order_date > (select max(ship_date) from silver.orders)) as after_extract_end,
+         percentile_cont(0.5) within group (order by amount / nullif(quantity * price, 0)) as median_ratio
+  from silver.orders;
+  ```
+  Check the ratio distribution first: if `amount ≈ quantity × price` for nearly all rows, a large ratio
+  is a reliable spike test; if not, use a percentile.
+- Options: A flag with `amount_issue`, keep the raw value, exclude flagged rows from revenue ·
+  B repair (recompute from quantity × price) – only if the formula holds exactly · C delete rows (breaks
+  reconciliation).
+- Recommend A, and show the excluded value on a data-quality page. Future dates: set the date empty
+  with `<date>_status = 'future'` (same handling as missing dates, R2-2).
 
 ### Round 3 – after gold, before the report
 
@@ -183,6 +224,26 @@ partial extract) looks like a collapse or a spike in trend visuals and distorts 
 have (returns, targets, profit without cost).
 - Options: substitute a supported KPI (e.g. margin %) · leave a placeholder · source the data.
 - Recommend substituting and saying so explicitly in the hand-over.
+
+**R3-6 Many-to-many attribution.** A customer with three reps must not count three times.
+- Detect: rows per key in the bridge; total via a plain join vs the true total.
+  ```sql
+  select (select sum(f.revenue) from gold.fact_orders f join gold.bridge_customer_rep b using (customer_key)) as naive,
+         (select sum(f.revenue * b.allocation) from gold.fact_orders f join gold.bridge_customer_rep b using (customer_key)) as allocated,
+         (select sum(f.revenue) from gold.fact_orders f
+          where exists (select 1 from gold.bridge_customer_rep b where b.customer_key = f.customer_key)) as true_total;
+  ```
+- Options: A allocated credit (`1 / n` per rep; sums to the total) · B full credit to every rep (each rep
+  sees their customers' whole revenue; never sum across reps) · C a primary rep per customer.
+- Recommend A for rankings and totals; offer B as a separately named measure if reps want "my
+  customers' revenue". Template: `tmdl-templates.md` → *Bridge measures*.
+
+**R3-7 Which statuses count as revenue.** Cancelled and returned orders often still carry an amount.
+- Detect: `select status, count(*), sum(revenue), round(100 * sum(revenue) / sum(sum(revenue)) over (), 1) from gold.fact_orders group by 1;`
+- Options: A net revenue = completed/shipped statuses only; open (pending) orders as a separate measure;
+  all-status value shown separately and named "order value" · B all statuses (gross) · C completed only.
+- Recommend A, and compare targets with the same definition. In a test dataset Cancelled + Returned were
+  40 % of the amount – including them would have reported 2.5× the real revenue.
 
 ### Round 4 – before hand-over
 

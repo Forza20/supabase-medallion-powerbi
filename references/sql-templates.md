@@ -7,10 +7,13 @@ with the user's sources. Every block is safe to rerun.
 1. Schemas
 2. Bronze tables
 3. Loading bronze
+   - psql · Table Editor · Loading without psql (token-protected RPC + curl) · Row-count check
 4. Silver procedure
+   - Parsing helpers · Flag amount anomalies · Dedupe by quality score · Unpivot wide files
 5. Gold star schema + load procedure
    - Point-in-time value (e.g. unit cost at the order date)
    - Derived date with flag
+   - Inferred members · Bridge with allocation
 6. Quality checks (incl. source-conflict info check)
 7. Security (read-only role, RLS)
 8. Scheduling with pg_cron
@@ -80,6 +83,96 @@ $src = 'C:\data\erp\LOC_A101.csv'; $dst = 'C:\data\import\erp_locations.csv'
 $lines = Get-Content $src
 @($lines[0].ToLower()) + $lines[1..($lines.Count-1)] | Set-Content $dst -Encoding utf8
 ```
+
+### Loading without psql (token-protected RPC + curl)
+
+Use only when psql, Python and the Table Editor are not options (e.g. files too big for MCP, no
+installs allowed). Ask the user first: the function is a write endpoint on the public API while it
+exists. Tested with 50,000 + 6,300 lines in 5,000-line batches.
+
+**1. Staging table and splitter (keep – part of bronze, in a migration):**
+
+```sql
+create table if not exists bronze.raw_lines (
+    file_name text not null, line_no int not null, line text not null,
+    primary key (file_name, line_no)
+);
+alter table bronze.raw_lines enable row level security;
+
+-- Split one CSV line into fields (quoted fields may contain commas; no escaped quotes assumed)
+create or replace function bronze.split_csv_line(p_line text)
+returns text[] language sql immutable set search_path = '' as $$
+  select array_agg(nullif(trim(both '"' from m[1]), '') order by ord)
+  from regexp_matches(p_line || ',', '("[^"]*"|[^,]*),', 'g') with ordinality as r(m, ord)
+$$;
+
+-- load_bronze(): truncate the per-file tables, then for each file:
+-- insert into bronze.<file> select line_no, f[1], f[2], ...
+-- from (select line_no, bronze.split_csv_line(line) f from bronze.raw_lines
+--       where file_name = '<file>' and line_no > 1) s;
+```
+
+Check the field count before trusting the split:
+`select count(*) from bronze.raw_lines where line_no > 1 and cardinality(bronze.split_csv_line(line)) <> <columns>;` → 0.
+
+**2. Temporary endpoint (NOT a migration – run via SQL, drop after the load):**
+
+```sql
+create table bronze._ingest_token (token text primary key, expires_at timestamptz not null);
+alter table bronze._ingest_token enable row level security;
+
+create or replace function public.bronze_ingest(p_token text, p_file text, p_start int, p_lines text[])
+returns int language plpgsql security definer set search_path = '' as $$
+begin
+  if not exists (select 1 from bronze._ingest_token t where t.token = p_token and t.expires_at > now()) then
+    raise exception 'denied';
+  end if;
+  if p_file not in ('<file1>', '<file2>') then raise exception 'unknown file'; end if;   -- whitelist
+  insert into bronze.raw_lines (file_name, line_no, line)
+  select p_file, p_start + u.ord - 1, u.l from unnest(p_lines) with ordinality as u(l, ord)
+  on conflict (file_name, line_no) do update set line = excluded.line;
+  return coalesce(array_length(p_lines, 1), 0);
+end $$;
+revoke all on function public.bronze_ingest(text, text, int, text[]) from public, authenticated;
+grant execute on function public.bronze_ingest(text, text, int, text[]) to anon;
+
+-- Generate the token locally (random 32 bytes, hex); keep it in the scratchpad, never in the repo
+insert into bronze._ingest_token values ('<token>', now() + interval '1 hour');
+```
+
+**3. Upload (bash; `curl` ships with Git for Windows).** The URL and publishable key come from the
+MCP tools `get_project_url` and `get_publishable_keys`.
+
+```bash
+CH=5000
+for f in file1 file2; do
+  n=$(wc -l < "$DIR/$f.csv"); start=1
+  while [ $start -le $n ]; do
+    tr -d '\r' < "$DIR/$f.csv" | awk -v s=$start -v e=$((start+CH-1)) -v tok="$TOK" -v file="$f" '
+      NR==s{printf "{\"p_token\":\"%s\",\"p_file\":\"%s\",\"p_start\":%d,\"p_lines\":[", tok, file, s}
+      NR>=s && NR<=e{gsub(/"/,"\\\""); printf "%s\"%s\"", (NR>s?",":""), $0}
+      END{printf "]}"}' > body.json
+    r=$(curl -s -X POST "$URL/rest/v1/rpc/bronze_ingest" -H "apikey: $KEY" \
+          -H "Content-Type: application/json" --data-binary @body.json)
+    case "$r" in ''|*[!0-9]*) echo "$f chunk $start FAILED: $r"; exit 1;; esac
+    start=$((start+CH))
+  done
+done
+```
+
+Check first that the files contain no backslashes (`grep -cF '\' *.csv` → 0); otherwise escape them
+too. A PGRST202 error ("could not find the function") usually means the JSON body is malformed.
+
+**4. Clean up and verify** – immediately after the upload:
+
+```sql
+drop function if exists public.bronze_ingest(text, text, int, text[]);
+drop table if exists bronze._ingest_token;
+select count(*) from pg_proc where proname = 'bronze_ingest';   -- 0
+```
+
+If the `drop` is declined by the user's permission settings, first neutralise the endpoint
+(`update bronze._ingest_token set expires_at = now();`) and give the user the drop statements to run.
 
 ### Row-count check
 
@@ -166,6 +259,94 @@ $$;
 ```
 
 Run with `call silver.load_silver();`.
+
+### Parsing helpers (messy text columns)
+
+```sql
+create or replace function silver.key_no(p text) returns int
+language sql immutable set search_path = '' as $$
+  select nullif(regexp_replace(p, '\D', '', 'g'), '')::int            -- CUST-0001 / C0001 / 0001 -> 1
+$$;
+create or replace function silver.parse_date(p text) returns date
+language sql immutable set search_path = '' as $$
+  select case when p ~ '^\d{4}-\d{2}-\d{2}$'       then to_date(p, 'YYYY-MM-DD')
+              when p ~ '^\d{2}/\d{2}/\d{4}$'       then to_date(p, 'MM/DD/YYYY')   -- check first: no part > 12 in position 1
+              when p ~ '^\d{2}-[A-Za-z]{3}-\d{4}$' then to_date(p, 'DD-Mon-YYYY') end
+$$;
+create or replace function silver.parse_money(p text) returns numeric
+language sql immutable set search_path = '' as $$
+  select nullif(regexp_replace(p, '[$,\s]', '', 'g'), '')::numeric     -- $1,200.00 / 1,200 / -$5 -> numeric
+$$;
+create or replace function silver.parse_bool(p text) returns boolean
+language sql immutable set search_path = '' as $$
+  select case upper(trim(p)) when 'TRUE' then true when 'YES' then true when 'Y' then true when '1' then true
+                             when 'FALSE' then false when 'NO' then false when 'N' then false when '0' then false end
+$$;
+```
+
+Only strip digits from keys after checking that no number means two different things across formats.
+
+### Flag amount anomalies (decision R2-6)
+
+```sql
+case
+  when amount is null                                     then 'missing'
+  when amount < 0                                         then 'negative'
+  when amount = 0 and status = 'Completed'                then 'zero on completed'
+  when quantity = 0 and status = 'Completed'              then 'zero quantity on completed'
+  when quantity > 0 and price > 0 and amount > 5 * quantity * price then 'spike (>5x expected)'
+  else 'ok'
+end as amount_issue,
+case when order_date is null then 'missing'
+     when order_date > v_extract_end then 'future'         -- v_extract_end = max(ship_date)
+     else 'ok' end as order_date_status
+```
+
+Gold then sets `revenue = case when amount_issue = 'ok' then amount end`, keeping `amount_raw`.
+
+### Dedupe by quality score (decision R2-5, no timestamp)
+
+```sql
+create temporary table tmp_orders on commit drop as
+select s.*,
+       row_number() over (partition by order_no order by quality_score desc, source_line) as rn,
+       count(*)     over (partition by order_no)                                        as versions
+from (
+  select p.*,
+         (order_date_status = 'ok')::int + (amount_issue = 'ok')::int
+         + (order_date is null or ship_date is null or ship_date >= order_date)::int
+         + (quantity is not null)::int as quality_score
+  from parsed_orders p
+) s;
+
+insert into silver.orders select ... from tmp_orders where rn = 1;
+
+-- Keep the evidence: one row per removed version and why it differed
+insert into silver.order_duplicates_removed (source_line, order_no, kept_source_line, duplicate_type)
+select d.source_line, d.order_no, k.source_line,
+       case when d.row_hash = k.row_hash then 'identical'
+            when d.amount is not distinct from k.amount then 'same amount, other date/fields'
+            else 'different amount' end
+from tmp_orders d join tmp_orders k on k.order_no = d.order_no and k.rn = 1
+where d.rn > 1;
+```
+
+`row_hash` = `md5(concat_ws('|', <parsed columns>))`, computed on parsed values so that the same date in
+two formats counts as identical. Test: `bronze rows = silver rows + removed rows`.
+
+### Unpivot wide files (one column per month)
+
+```sql
+insert into silver.monthly_targets (customer_no, month_start, target_amount)
+select no, make_date(yr, m, 1), max(amt)
+from (select silver.key_no(t.cust_id) no, t.year::int yr, v.m, silver.parse_money(v.val) amt
+      from bronze.wide_monthly_targets t
+      cross join lateral (values (1, t.jan_target), (2, t.feb_target), (3, t.mar_target), (4, t.apr_target),
+                                 (5, t.may_target), (6, t.jun_target), (7, t.jul_target), (8, t.aug_target),
+                                 (9, t.sep_target), (10, t.oct_target), (11, t.nov_target), (12, t.dec_target)) v(m, val)) x
+where amt is not null          -- an empty cell means "no target", not 0
+group by no, yr, m;
+```
 
 ## 5. Gold star schema + load procedure
 
@@ -304,6 +485,48 @@ where s.sls_order_dt is null;
 Add `sls_order_dt_derived boolean not null default false` to the silver table and carry it to gold as
 `order_date_derived`, so derived rows can be filtered or shown.
 
+### Inferred members (decision R2-4)
+
+One dimension row per id that appears in the fact but not in the source dimension:
+
+```sql
+insert into gold.dim_customer (customer_key, customer_no, full_name, segment, region, is_inferred)
+with ids as (
+    select customer_no, false as inferred from silver.customers
+    union
+    select distinct o.customer_no, true from silver.orders o
+    where o.customer_no is not null
+      and not exists (select 1 from silver.customers c where c.customer_no = o.customer_no))
+select row_number() over (order by i.customer_no), i.customer_no,
+       coalesce(c.full_name, 'Unknown customer'), coalesce(c.segment, 'n/a'), coalesce(c.region, 'n/a'),
+       i.inferred
+from ids i left join silver.customers c on c.customer_no = i.customer_no;
+```
+
+The fact can then use an inner join to the dimension without losing rows. Test: orders on inferred
+customers = the expected orphan count (computed on silver, after dedupe).
+
+### Bridge with allocation (many-to-many, decision R3-6)
+
+```sql
+create table if not exists gold.bridge_customer_rep (
+    customer_key int not null references gold.dim_customer (customer_key),
+    rep_key      int not null references gold.dim_rep (rep_key),
+    allocation   numeric(6,5) not null,              -- 1 / reps per customer
+    primary key (customer_key, rep_key)
+);
+
+insert into gold.bridge_customer_rep
+select c.customer_key, r.rep_key, round(1.0 / count(*) over (partition by c.customer_key), 5)
+from (select distinct customer_no, rep_no from silver.customer_rep) b     -- the source had duplicate pairs
+join gold.dim_customer c on c.customer_no = b.customer_no
+join gold.dim_rep      r on r.rep_no      = b.rep_no;
+```
+
+Tests: `select customer_key from gold.bridge_customer_rep group by 1 having abs(sum(allocation) - 1) > 0.0001` → 0 rows;
+allocated total = revenue of customers that have a rep (rounding of 1/3 leaves a few hundred out of
+hundreds of millions). DAX: `tmdl-templates.md` → *Bridge measures*.
+
 ## 6. Quality checks (expect 0 everywhere)
 
 ```sql
@@ -338,6 +561,16 @@ where c.cst_gndr <> 'n/a' and e.gen <> 'n/a' and c.cst_gndr <> e.gen;
 select 'gender' as col, string_agg(distinct gender, ', ') from gold.dim_customers
 union all select 'country', string_agg(distinct country, ', ') from gold.dim_customers;
 ```
+
+Two traps when writing checks and summary tables:
+
+- **Expected values from the same layer.** Compute every expected count on the layer the test reads.
+  Orphans counted in the raw CSV (2,015 rows) were 1,965 orders in gold after deduplication.
+- **`null` in the first branch of a `union all` is typed `text`.** A later numeric branch then fails
+  with *UNION types text and numeric cannot be matched*. Cast it: `select 10, 'Orders', count(*), null::numeric, ...`.
+
+A `data_quality` table in gold (one row per rule: rows affected, amount affected, handling) gives the
+report a data-quality page that explains every difference between source and model.
 
 ## 7. Security (read-only role, RLS)
 

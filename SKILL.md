@@ -33,9 +33,9 @@ are for. So the skill interviews the user at four points, using evidence from th
 
 | Round | When | Typical decisions |
 |---|---|---|
-| 1 | Before building | Purpose and audience, grain, business keys, dimension history, refresh cadence |
-| 2 | After silver | Historical prices on facts, missing dates, source conflicts, unknown members, duplicates |
-| 3 | After gold, before the report | Non-additive counts, incomplete edge periods, "current month", units, unsupported KPIs |
+| 1 | Before building | Purpose and audience, grain, business keys, dimension history, refresh cadence, schema names |
+| 2 | After silver | Historical prices on facts, missing dates, source conflicts, unknown members, duplicates, amount anomalies |
+| 3 | After gold, before the report | Non-additive counts, incomplete edge periods, "current month", units, unsupported KPIs, many-to-many credit, revenue statuses |
 | 4 | Before hand-over | Repo visibility and identifiers, passwords and access, documentation |
 
 **Read `references/decision-interview.md` before Round 1.** It holds the protocol and a question bank
@@ -52,8 +52,20 @@ with detection SQL. The short version:
 
 ## Phase 0 – Understand the sources and agree the model
 
-Before writing any SQL, profile every CSV (header, row count, sample rows, obvious data-quality issues),
-then run **interview Round 1**. These answers drive every later decision:
+**Check the environment first**, because it decides how you load and validate later:
+
+- Which tools exist: `psql`, `python`, `node` (for a PBIR tool), `curl`. Without psql and Python, large
+  files cannot go through the Supabase MCP server (50,000 rows ≈ 6 MB of SQL) – plan the load now
+  (Phase 1, last option).
+- Free disk space on the system drive (see *Environment* in the troubleshooting reference).
+- Which schemas already exist in the Supabase project. If `bronze`/`silver`/`gold` belong to another
+  model, use a prefix for this one (`<prefix>_bronze`, …) – decision R1-6. Never build over another
+  model's schemas.
+
+Then profile every CSV (header, row count, sample rows, obvious data-quality issues) and run
+**interview Round 1**. Measure every quality claim yourself: data dictionaries that ship with a dataset
+can be wrong (a test dataset promised ~12 % mismatching regions; the measured share was 75 %). These
+answers drive every later decision:
 
 - **Purpose and audience** – demo/reference, reusable template or production. It decides how much
   automation, history and hardening is worth building.
@@ -69,12 +81,14 @@ https://dbdiagram.io is a quick way to show it.
 
 ## Phase 1 – Schemas and bronze
 
-1. Create `bronze`, `silver`, `gold` schemas. Ship every DDL change as a numbered migration file
-   (`supabase/migrations/<timestamp>_<name>.sql`) so the database can be rebuilt; use
-   `create ... if not exists` so reruns are safe.
+1. Create `bronze`, `silver`, `gold` schemas (or the prefixed names from R1-6). Ship every DDL change as
+   a numbered migration file (`supabase/migrations/<timestamp>_<name>.sql`) so the database can be
+   rebuilt; use `create ... if not exists` so reruns are safe.
 2. One bronze table per CSV, **columns in the same order as the CSV header, all lower case**, types as
    close to the source as possible (integers stay integers, dates stored `yyyymmdd` stay integers – they
-   are parsed in silver). See `references/sql-templates.md` → *Bronze*.
+   are parsed in silver). When a column mixes formats (`$1,200.00` / `1200`, three date formats,
+   `YES`/`1`/`True`), make it `text` – bronze must accept every source value. See
+   `references/sql-templates.md` → *Bronze*.
 3. Load the data, then compare row counts with the files (`lines - 1`, or `lines` if the last line has
    no trailing newline). Options, best first:
    - `psql \copy` through the **session pooler** (fast, scriptable). Template in the SQL reference.
@@ -82,6 +96,11 @@ https://dbdiagram.io is a quick way to show it.
      so **upper-case headers silently fail** – lower-case the header line first. It aborts the whole file
      on one bad value, so read the error banner.
    - For tiny lookup files only: `insert ... values` through SQL/MCP.
+   - **No psql, no Python, files too big for MCP:** a temporary, token-protected RPC function that
+     accepts batches of raw CSV lines, called with `curl` (template: *Loading without psql*). Ask the
+     user first – it opens a write endpoint for the duration of the load – then drop the function and
+     token table and verify both are gone. Bronze keeps a `raw_lines` table; a procedure splits it into
+     the per-file tables, so the load can be replayed without uploading again.
 
 Do not clean data in bronze. Bronze is the replayable copy of the source; cleaning there destroys the
 evidence you need when a number looks wrong later.
@@ -97,6 +116,16 @@ Typical transformations (patterns in `references/sql-templates.md` → *Silver*)
 - Recompute derived values that are inconsistent (e.g. `sales <> quantity * price`).
 - Normalise country/gender variants (`DE`→`Germany`, `US`/`USA`→`United States`, blank → `'n/a'`).
 - Null out impossible values (future birth dates) rather than deleting rows.
+- **Flag, don't delete, suspicious measures**: negative amounts, spikes against `quantity × price`,
+  zero amounts on completed orders, order dates after the extract end (the latest ship date is a good
+  extract end). Keep the raw value and an `amount_issue` / `<date>_status` column; gold decides what
+  counts (decision R2-6).
+- **Duplicates without a timestamp**: when no created/modified column exists, score every version
+  (one point per passed check: valid date, valid amount, ship ≥ order …) and keep the highest score,
+  then the first source line. Store the removed rows with their duplicate type
+  (identical / other date / other amount) so the numbers can be explained (decision R2-5).
+- **Wide files** (one column per month) are unpivoted to long rows in silver with
+  `cross join lateral (values …)`; empty cells are dropped, not turned into zeros.
 
 Give the procedure `set search_path = ''` and schema-qualify every table name. Supabase's security
 advisor flags procedures with a mutable search path, and the fixed path removes a class of
@@ -116,8 +145,14 @@ and Power BI imports from tables are faster and predictable.
 - Surrogate keys `<name>_key` generated with `row_number()` in the load; keep business keys as columns.
 - Fact table stores the dimension keys plus measures; date columns stay real `date` columns.
 - Add indexes on fact foreign keys and the main date column.
+- **Missing dimension members**: when the fact references ids that are absent from the dimension but
+  the id itself is known, add one *inferred* row per id (`is_inferred = true`, attributes `'n/a'`)
+  rather than a single "Unknown" row – otherwise distinct customer counts collapse (decision R2-4).
+- **Many-to-many links** (customer ↔ sales rep, product ↔ campaign): keep a bridge table with an
+  `allocation = 1 / n` column. A plain join through the bridge inflates every sum (+66 % in a test
+  dataset). Decide attribution with the user (R3-6) and test that allocations sum to 1 per key.
 
-Template: `references/sql-templates.md` → *Gold*.
+Template: `references/sql-templates.md` → *Gold* and *Bridge with allocation*.
 
 ## Phase 4 – Quality checks
 
@@ -128,13 +163,18 @@ Run checks that return **0 on success** so a glance tells you the state (templat
 - Business rules (sales = quantity × price, order date ≤ ship date, no negative cost).
 - Distinct values of every standardised column (to spot a variant you missed).
 
+Compute every expected value **on the same layer the test reads**. A count taken from the raw files
+("2,015 orphan rows") will not match gold after deduplication (1,965 orders) – the test fails although
+the data is right.
+
 Report known, accepted exceptions explicitly (e.g. "19 order lines have an invalid source date"), and
 tell the user how they will show up in the report (in totals, missing from date-based visuals).
 
 Then run **interview Round 3** on the gold data, before any visual is built: do breakdowns of distinct
 counts add up to the total, are the first and last periods complete (and is the last one plausible,
 not a truncated extract), what counts as the "current" month, which units to show, and which requested
-KPIs the data cannot support.
+KPIs the data cannot support, **which statuses count as revenue** (Cancelled and Returned orders often
+carry an amount), and how many-to-many attributions are credited.
 
 ## Phase 5 – Security for Power BI
 
@@ -148,7 +188,11 @@ Power BI should log in with its own read-only role, never with `postgres`. Templ
   which looks like a broken refresh rather than a permission problem.
 - Let the user set the password themselves (`alter role powerbi_reader with password '...'`); never
   write it into a file, migration or chat.
-- Run the Supabase security advisor afterwards; aim for zero findings.
+- Run the Supabase security advisor afterwards; aim for zero findings on gold. On bronze and silver,
+  "RLS enabled, no policy" (INFO) is intended: nobody but the owner should read them.
+- The user's permission settings may decline MCP calls that `drop`, `grant` or create policies. Do not
+  retry the same call. Put the step in its own migration file and give the user the SQL **inline** to
+  paste into the SQL Editor, then verify the result with a read-only query.
 
 ## Phase 6 – Connect Power BI
 
@@ -209,7 +253,15 @@ A PBIP project is text, which makes it reviewable and diffable. Structure and te
   entry file (`<Name>1.pbip`) on save. Both are normal; rename the entry file back while Desktop is closed.
 - Build visuals with a PBIR-aware tool if one is available (for example the `powerbi-report-author` CLI
   for validation and previews). Validate after every batch of edits and review a screenshot of every
-  changed page before calling it done – schema-valid PBIR can still render badly.
+  changed page before calling it done – schema-valid PBIR can still render badly. **Without Node**,
+  validate every JSON file (PowerShell `ConvertFrom-Json`) and cross-check every `queryRef` and
+  `sortDefinition` field against the columns and measures in the TMDL files (script in
+  `references/tmdl-templates.md` → *Validation without Node*), then ask the user for a screenshot.
+- **Apply formatting defaults when you create a visual, not after the first screenshot**
+  (`references/tmdl-templates.md` → *Formatting defaults*): cards hide the label under the value
+  (the title already names it) and set display units explicitly (counts whole, amounts in millions);
+  bar charts sort by the measure, descending; axis titles off when the visual title names the axes.
+  Auto units render "1tusind" customers, and small cards cut the value off.
 - New **card visuals (`cardVisual`) draw their own inner tile** (`fillCustom`, white by default) on top
   of the container background. Dark KPI tiles therefore render as white boxes with a thin dark frame and
   white labels disappear. Set `fillCustom.transparency` to 100 (selector `id: default`).
@@ -226,6 +278,9 @@ Then finish with:
 3. Commit migrations, tests and the PBIP to Git; make sure `.pbi/localSettings.json` and
    `.pbi/cache.abf` are git-ignored and no password is in any file.
 4. A step-by-step guide for the user's team if they want one.
+5. A table of expected values per visual (from SQL on gold), so the user can check the report against
+   it. In chat, give file links relative to the workspace root, plus the full path for files the user
+   opens outside the editor.
 
 ## When something goes wrong
 
