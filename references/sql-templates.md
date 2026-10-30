@@ -399,31 +399,59 @@ as $$
 begin
     truncate table gold.fact_sales, gold.dim_customers, gold.dim_products;
 
-    insert into gold.dim_customers
-    select row_number() over (order by c.cst_id),
-           c.cst_id, c.cst_key, c.cst_firstname, c.cst_lastname,
-           coalesce(l.cntry, 'n/a'), c.cst_marital_status, c.cst_gndr,
-           null::date, c.cst_create_date
+    insert into gold.dim_customers (customer_key, customer_id, customer_number, first_name, last_name,
+                                    country, marital_status, gender, birthdate, create_date)
+    select row_number() over (order by c.cst_id) as customer_key,
+           c.cst_id                   as customer_id,
+           c.cst_key                  as customer_number,
+           c.cst_firstname            as first_name,
+           c.cst_lastname             as last_name,
+           coalesce(l.cntry, 'n/a')   as country,
+           c.cst_marital_status       as marital_status,
+           c.cst_gndr                 as gender,
+           null::date                 as birthdate,
+           c.cst_create_date          as create_date
     from silver.crm_customers c
     left join silver.erp_locations l on l.cid = c.cst_key;
 
-    insert into gold.dim_products
-    select row_number() over (order by p.prd_start_dt, p.prd_key),
-           p.prd_id, p.prd_key, p.prd_nm, x.cat, x.subcat, p.prd_cost, p.prd_line, p.prd_start_dt
+    insert into gold.dim_products (product_key, product_id, product_number, product_name, category,
+                                   subcategory, cost, product_line, start_date)
+    select row_number() over (order by p.prd_start_dt, p.prd_key) as product_key,
+           p.prd_id       as product_id,
+           p.prd_key      as product_number,
+           p.prd_nm       as product_name,
+           x.cat          as category,
+           x.subcat       as subcategory,
+           p.prd_cost     as cost,
+           p.prd_line     as product_line,
+           p.prd_start_dt as start_date
     from silver.crm_products p
     left join silver.erp_categories x on x.id = p.cat_id
     where p.prd_end_dt is null;            -- current version only
 
-    insert into gold.fact_sales
-    select s.sls_ord_num, p.product_key, c.customer_key,
-           s.sls_order_dt, s.sls_ship_dt, s.sls_due_dt,
-           s.sls_sales, s.sls_quantity, s.sls_price
+    insert into gold.fact_sales (order_number, product_key, customer_key, order_date, shipping_date,
+                                 due_date, sales_amount, quantity, price)
+    select s.sls_ord_num  as order_number,
+           p.product_key,
+           c.customer_key,
+           s.sls_order_dt as order_date,
+           s.sls_ship_dt  as shipping_date,
+           s.sls_due_dt   as due_date,
+           s.sls_sales    as sales_amount,
+           s.sls_quantity as quantity,
+           s.sls_price    as price
     from silver.crm_sales s
     left join gold.dim_products  p on p.product_number = s.sls_prd_key
     left join gold.dim_customers c on c.customer_id    = s.sls_cust_id;
 end;
 $$;
 ```
+
+**Name the target columns and alias computed values** in every gold `insert` (e.g.
+`case when s.amount_issue = 'ok' then s.amount end as revenue`). It keeps the load readable, a column
+added to the table cannot silently shift the others, and lineage tools (pbip-catalog's
+`sql_lineage.py`) can follow each gold column back to silver and bronze. Without it, 6 of 10 gold
+tables in a test stopped at the gold layer in the data catalog.
 
 Run with `call gold.load_gold();`. If a gold table is read by a role that gets RLS, see section 7.
 
