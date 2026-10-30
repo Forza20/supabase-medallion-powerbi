@@ -11,6 +11,10 @@ Grouped by phase. Each entry was hit in a real build.
 | Row count is one higher/lower than `wc -l` | The file has no trailing newline (or has a blank last line) | Compare with `lines - 1` and `lines`; check the last line |
 | `winget install PostgreSQL...` fails with "Installer hash does not match" | Stale package manifest | Install psql from the vendor's installer (command-line tools only), or use the Table Editor |
 | `psql` login fails through the pooler | User name lacks the project ref | Use `postgres.<project-ref>` (or `<role>.<project-ref>`) |
+| `psql` "not recognized" although PostgreSQL was installed | Installer does not add `bin` to PATH | Call `C:\Program Files\PostgreSQL\<version>\bin\psql.exe` by full path |
+| `psql -w` fails with "no password supplied" | No matching line in the password file | Add `<host>:5432:postgres:<role>.<project-ref>:<password>` to `%APPDATA%\postgresql\pgpass.conf` (`~/.pgpass`); host, port, db and user must match exactly |
+| `\copy` fails: "COPY FROM not supported with row-level security" | Target table has RLS and the role is not its owner | Copy into a temp table, then `insert into … select * from temp` (template in the SQL reference) |
+| Creating the RPC upload endpoint is refused by an agent's permission check ("Security Weaken") | Automated modes treat a new public write endpoint as a security risk | Load with psql and a loader role instead |
 | No psql, no Python, and the file is too big for an MCP `insert` | Tooling missing on the machine | Token-protected RPC + `curl` (`sql-templates.md` → *Loading without psql*); drop the endpoint afterwards |
 | `curl` to the RPC returns PGRST202 "Could not find the function … without parameters" | Request body is not valid JSON (e.g. an awk escaping error), so PostgREST sees no named parameters | Inspect the body file; escape `"` (and `\` if present) in every line |
 

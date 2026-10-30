@@ -62,18 +62,51 @@ create table if not exists bronze.crm_sales (
 
 ### psql through the session pooler (PowerShell)
 
-```powershell
-# Set in the session only – never store the password in a file.
-$env:PGPASSWORD = '<password>'
-$env:PGHOST     = 'aws-0-<region>.pooler.supabase.com'   # Supabase → Connect → Session pooler
-$env:PGPORT     = '5432'
-$env:PGDATABASE = 'postgres'
-$env:PGUSER     = 'postgres.<project-ref>'               # pooler needs user.project-ref
+psql may be installed without being on PATH – call it by full path. The password lives in the user's
+password file, never in a script, an environment variable in a committed file, or the chat:
+`%APPDATA%\postgresql\pgpass.conf` (Windows) / `~/.pgpass`, one line
+`<pooler-host>:5432:postgres:<role>.<project-ref>:<password>` (escape `:` and `\` in the password as `\:`, `\\`).
 
-psql -c "truncate bronze.crm_customers"
-psql -c "\copy bronze.crm_customers from 'C:/data/crm/customers.csv' with (format csv, header true)"
-psql -tAc "select count(*) from bronze.crm_customers"
+```powershell
+$psql = 'C:\Program Files\PostgreSQL\17\bin\psql.exe'          # or (Get-Command psql).Source
+$conn = 'host=aws-0-<region>.pooler.supabase.com port=5432 dbname=postgres user=<role>.<project-ref> sslmode=require'
+& $psql $conn -w -c "select current_user"                       # -w: fail instead of prompting for a password
+
+& $psql $conn -w -v ON_ERROR_STOP=1 -c "truncate bronze.crm_customers"
+& $psql $conn -w -v ON_ERROR_STOP=1 -c "\copy bronze.crm_customers from 'C:/data/crm/customers.csv' with (format csv, header true)"
+& $psql $conn -w -tAc "select count(*) from bronze.crm_customers"
 ```
+
+**Table with RLS** (Supabase enables it on new tables): `\copy … from` fails for a role that is not the
+owner. Load into a temp table in the same session instead (one `-f` script or several `-c` in one call):
+
+```sql
+create temp table s (like bronze.raw_lines including defaults);
+\copy s from 'C:/data/stage/fact_orders.tsv' with (format text, encoding 'UTF8')
+insert into bronze.raw_lines select * from s;
+```
+
+### Loader role (least privilege for psql loads)
+
+A login that can do nothing until it is granted one run's bronze table, so the main `postgres` password is
+never used for loading. The user sets the password and the password-file line themselves.
+
+```sql
+create role bronze_loader login noinherit connection limit 3;
+alter role bronze_loader set statement_timeout = '10min';
+-- before the load (run as owner):
+grant usage on schema bronze to bronze_loader;
+grant select, insert, delete, truncate on bronze.raw_lines to bronze_loader;
+create policy bronze_loader_load on bronze.raw_lines for all to bronze_loader using (true) with check (true);
+-- after the load:
+drop policy bronze_loader_load on bronze.raw_lines;
+revoke all on bronze.raw_lines from bronze_loader;
+revoke usage on schema bronze from bronze_loader;
+```
+
+When the grants have to be repeated per run (or the MCP connection declines `grant`), wrap them in two
+`security definer` functions with a name guard and call them with `select` – see the pipeline example
+`mp_grant_loader` / `mp_revoke_loader`.
 
 ### Table Editor
 Lower-case the header line first (columns are matched by exact name). Example in PowerShell:

@@ -56,7 +56,10 @@ with detection SQL. The short version:
 
 - Which tools exist: `psql`, `python`, `node` (for a PBIR tool), `curl`. Without psql and Python, large
   files cannot go through the Supabase MCP server (50,000 rows ≈ 6 MB of SQL) – plan the load now
-  (Phase 1, last option).
+  (Phase 1, last option). **On Windows, psql is often installed but not on PATH**: look for
+  `C:\Program Files\PostgreSQL\<version>\bin\psql.exe` before concluding it is missing, and call it by
+  full path. Check for a password file (`%APPDATA%\postgresql\pgpass.conf`, Linux/macOS `~/.pgpass`) with
+  a line for the login you will use – test with `psql … -w -c "select current_user"` (`-w` never prompts).
 - Free disk space on the system drive (see *Environment* in the troubleshooting reference).
 - Which schemas already exist in the Supabase project. If `bronze`/`silver`/`gold` belong to another
   model, use a prefix for this one (`<prefix>_bronze`, …) – decision R1-6. Never build over another
@@ -91,7 +94,13 @@ https://dbdiagram.io is a quick way to show it.
    `references/sql-templates.md` → *Bronze*.
 3. Load the data, then compare row counts with the files (`lines - 1`, or `lines` if the last line has
    no trailing newline). Options, best first:
-   - `psql \copy` through the **session pooler** (fast, scriptable). Template in the SQL reference.
+   - `psql \copy` through the **session pooler** (fast, scriptable, no public endpoint). Use a password
+     file, not `PGPASSWORD` in a script, and preferably a dedicated loader role that may only write to the
+     bronze tables (template: *Loader role*). `\copy` into a table with RLS fails for a non-owner ("COPY
+     FROM not supported with row-level security") – copy into a temp table and `insert … select`.
+     Templates in the SQL reference. Prefer this over the RPC option below whenever psql exists: an agent
+     running in an automated/permission-checked mode may be refused when it tries to create a public write
+     endpoint.
    - Supabase **Table Editor → Insert → Import data from CSV**. It matches columns by exact header name,
      so **upper-case headers silently fail** – lower-case the header line first. It aborts the whole file
      on one bad value, so read the error banner.
