@@ -571,10 +571,21 @@ current Power BI Desktop (it is not distributed with this skill) and use its `na
 ```
 
 ### Dark KPI tiles with `cardVisual`
-Container background alone is not enough; the card's inner tile covers it. Add to the visual's
-`objects`:
+Container background alone is not enough; the card's own inner tile ("Multi-card layout → Background",
+Danish "Layout med flere kort → Baggrund") covers it. Turn it off in the visual's `objects` (found by
+diffing `visual.json` after switching it off in Desktop; `fillCustom.transparency = 100` alone left the
+tiles white):
 
 ```json
+"layout": [
+  {
+    "properties": {
+      "paddingUniform": { "expr": { "Literal": { "Value": "0D" } } },
+      "backgroundShow": { "expr": { "Literal": { "Value": "false" } } }
+    },
+    "selector": { "id": "default" }
+  }
+],
 "fillCustom": [
   {
     "properties": { "transparency": { "expr": { "Literal": { "Value": "100D" } } } },

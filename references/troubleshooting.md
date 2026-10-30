@@ -55,7 +55,7 @@ Grouped by phase. Each entry was hit in a real build.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Dark KPI tiles render white with a thin dark frame; labels missing | `cardVisual` inner tile (`fillCustom`) drawn over the container background; white labels on white | `fillCustom.transparency = 100` with selector `id: default` |
+| Dark KPI tiles render white with a thin dark frame; labels missing | `cardVisual` draws its own inner tile over the container background; white labels on white | `layout.backgroundShow = false` with selector `id: default` (*Layout med flere kort → Baggrund* off); `fillCustom.transparency = 100` alone is not enough |
 | Small sparkline/area charts show an axis title (e.g. `month_start`) even with the axis hidden | `showAxisTitle` defaults to on | Set `showAxisTitle: false` on `categoryAxis` and `valueAxis` |
 | Line chart shows an unwanted vertical slider | Zoom slider shows on both axes by default | `zoom.showOnValueAxis: false` |
 | "This month vs last month" cards all show a big red drop | The data ends mid-month | Compare the latest *complete* month (see the measure template) |

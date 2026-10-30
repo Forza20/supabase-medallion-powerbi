@@ -262,9 +262,11 @@ A PBIP project is text, which makes it reviewable and diffable. Structure and te
   (the title already names it) and set display units explicitly (counts whole, amounts in millions);
   bar charts sort by the measure, descending; axis titles off when the visual title names the axes.
   Auto units render "1tusind" customers, and small cards cut the value off.
-- New **card visuals (`cardVisual`) draw their own inner tile** (`fillCustom`, white by default) on top
-  of the container background. Dark KPI tiles therefore render as white boxes with a thin dark frame and
-  white labels disappear. Set `fillCustom.transparency` to 100 (selector `id: default`).
+- New **card visuals (`cardVisual`) draw their own inner tile** (white by default) on top of the
+  container background. Dark KPI tiles therefore render as white boxes with a thin dark frame and white
+  labels disappear. Turn it off with `layout.backgroundShow = false` (Desktop: *Multi-card layout →
+  Background*, Danish *Layout med flere kort → Baggrund*; selector `id: default`). `fillCustom.transparency
+  = 100` alone left all 12 tiles white in a test.
 
 ## Phase 9 – Hand-over
 
