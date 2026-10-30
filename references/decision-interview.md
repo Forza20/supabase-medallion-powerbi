@@ -99,6 +99,9 @@ always asked).
   (`count(*) filter (where b.key is null)` after a left join).
 - Options: normalise in silver (strip prefixes/separators) · map table · accept unmatched as unknown.
 - Recommend normalising in silver, with a test that reports the unmatched count.
+- Also profile every date, amount and boolean column for format variants (regex classes per column, counts
+  per pattern). Log the result under R1-3 even when there is one format ("not applicable – checked: 1 date
+  format, 1 amount format, 1 boolean pair"), so a later review can see the check was made.
 
 **R1-4 History in dimensions.** Versioned rows (start/end dates) need a policy.
 - Detect: `select key, count(*) from silver.dim_source group by 1 having count(*) > 1`.
