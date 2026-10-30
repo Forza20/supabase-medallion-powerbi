@@ -484,7 +484,9 @@ $$;
 `case when s.amount_issue = 'ok' then s.amount end as revenue`). It keeps the load readable, a column
 added to the table cannot silently shift the others, and lineage tools (pbip-catalog's
 `sql_lineage.py`) can follow each gold column back to silver and bronze. Without it, 6 of 10 gold
-tables in a test stopped at the gold layer in the data catalog.
+tables in a test stopped at the gold layer in the data catalog. For the same reason, **no CTEs in gold
+inserts** (`insert … with x as (…) select …`): put the helper query in a subquery in `FROM` instead
+(example: *Inferred members* below).
 
 Run with `call gold.load_gold();`. If a gold table is read by a role that gets RLS, see section 7.
 
@@ -552,17 +554,23 @@ One dimension row per id that appears in the fact but not in the source dimensio
 
 ```sql
 insert into gold.dim_customer (customer_key, customer_no, full_name, segment, region, is_inferred)
-with ids as (
-    select customer_no, false as inferred from silver.customers
-    union
-    select distinct o.customer_no, true from silver.orders o
-    where o.customer_no is not null
-      and not exists (select 1 from silver.customers c where c.customer_no = o.customer_no))
-select row_number() over (order by i.customer_no), i.customer_no,
-       coalesce(c.full_name, 'Unknown customer'), coalesce(c.segment, 'n/a'), coalesce(c.region, 'n/a'),
-       i.inferred
-from ids i left join silver.customers c on c.customer_no = i.customer_no;
+select row_number() over (order by i.customer_no)  as customer_key,
+       i.customer_no                                as customer_no,
+       coalesce(c.full_name, 'Unknown customer')    as full_name,
+       coalesce(c.segment, 'n/a')                   as segment,
+       coalesce(c.region, 'n/a')                    as region,
+       i.inferred                                   as is_inferred
+from (select customer_no, false as inferred from silver.customers
+      union
+      select distinct o.customer_no, true from silver.orders o
+      where o.customer_no is not null
+        and not exists (select 1 from silver.customers c where c.customer_no = o.customer_no)) i
+left join silver.customers c on c.customer_no = i.customer_no;
 ```
+
+Use a subquery in `FROM`, not `insert … with ids as (…) select …`: lineage tools (pbip-catalog's
+`sql_lineage.py`) do not follow CTEs, so every column of a CTE-loaded table stops at the gold layer (all 8
+columns of `dim_guest` in a test run).
 
 The fact can then use an inner join to the dimension without losing rows. Test: orders on inferred
 customers = the expected orphan count (computed on silver, after dedupe).
