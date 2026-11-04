@@ -24,6 +24,24 @@ so follow the phases in order and run the checks at the end of each one. Every p
 verifiable (row counts, zero-error checks, a refreshed model), which is how you avoid debugging three
 layers at once later.
 
+## Checklist
+
+Tick these off in order; each line is one phase below.
+
+1. Environment, profiling, interview Round 1 (Phase 0)
+2. Bronze loaded, row counts = file lines − header (Phase 1)
+3. `silver.load_silver()` runs, Round 2 decided (Phase 2)
+4. `gold.load_gold()` runs, star schema with keys and indexes (Phase 3)
+5. Quality checks all 0, `docs/quality-results.md` written, Round 3 decided (Phase 4)
+6. Reader role, RLS, advisors clean (Phase 5)
+7. Power BI connection tested (Phase 6)
+8. PBIP/TMDL model validated (Phase 7)
+9. Report pages validated, screenshot reviewed (Phase 8)
+10. Hand-over: decision log, overview page, refresh steps (Phase 9)
+
+The reference files are long. Read only the section a phase points to (search for its heading),
+not the whole file.
+
 ## Working with the user: the decision interview
 
 The mechanics below are the same for every dataset; the decisions are not. Whether margin uses
@@ -133,6 +151,11 @@ Typical transformations (patterns in `references/sql-templates.md` → *Silver*)
   (one point per passed check: valid date, valid amount, ship ≥ order …) and keep the highest score,
   then the first source line. Store the removed rows with their duplicate type
   (identical / other date / other amount) so the numbers can be explained (decision R2-5).
+- **No temp tables in load procedures.** `create temp table … on commit drop` inside
+  `load_silver()` / `load_gold()` hides the intermediate rows from lineage tools and fails on a
+  second call in the same transaction. Use a named staging table in silver (`silver.stg_<name>`,
+  truncated at the start of the load) or a subquery. Temp tables are fine only in ad-hoc load scripts
+  (Phase 1, `\copy` with RLS).
 - **Wide files** (one column per month) are unpivoted to long rows in silver with
   `cross join lateral (values …)`; empty cells are dropped, not turned into zeros.
 
@@ -178,6 +201,19 @@ the data is right.
 
 Report known, accepted exceptions explicitly (e.g. "19 order lines have an invalid source date"), and
 tell the user how they will show up in the report (in totals, missing from date-based visuals).
+
+Write the results to `docs/quality-results.md` in this fixed format, one row per check, so later runs
+and tools can compare them:
+
+```markdown
+| # | Type | Check | Result |
+|---|------|-------|--------|
+| 1 | ERR  | dim_customer: duplicate key | 0 |
+| 7 | INFO | fact rows without order_date | 19 |
+```
+
+`ERR` rows must be 0. `INFO` rows are accepted exceptions; name the decision that accepts them
+(e.g. "19 (R2-2)").
 
 Then run **interview Round 3** on the gold data, before any visual is built: do breakdowns of distinct
 counts add up to the total, are the first and last periods complete (and is the last one plausible,
@@ -249,6 +285,18 @@ A PBIP project is text, which makes it reviewable and diffable. Structure and te
   Multi-line DAX goes one indentation level deeper than the object's properties.
 - `///` descriptions are valid on tables, columns and measures but **not on relationships** – Desktop
   fails with *"Property 'description' is unknown"*.
+- Write `///` descriptions **in the report language** (the language of page titles and measure
+  names). They show as tooltips in the field list, so English text in a Danish report looks unfinished.
+  The templates are in English; translate the descriptions when you copy them.
+
+### Validating the model without Desktop
+
+If the `powerbi-modeling-mcp` server is available, load the TMDL folder offline:
+`connection_operations` → `ConnectFolder` on `<Name>.SemanticModel/definition`. A successful connect
+means the model parses (tabs, quoting, references). After adding objects through the server, save with
+`ExportToTmdlFolder` and reconnect to confirm it still loads. **DAX queries do not run offline** – they
+need a running Power BI Desktop with the model open. Without Desktop, compare expected totals from SQL
+with the user's card or table visual instead.
 - Every object needs a unique `lineageTag` (GUID). Generate them; never copy them between objects.
 - A measure-only table needs a calculated partition and one hidden column (template provided).
 
@@ -266,6 +314,7 @@ A PBIP project is text, which makes it reviewable and diffable. Structure and te
   validate every JSON file (PowerShell `ConvertFrom-Json`) and cross-check every `queryRef` and
   `sortDefinition` field against the columns and measures in the TMDL files (script in
   `references/tmdl-templates.md` → *Validation without Node*), then ask the user for a screenshot.
+  For the model itself, see Phase 7 → *Validating the model without Desktop*.
 - **Apply formatting defaults when you create a visual, not after the first screenshot**
   (`references/tmdl-templates.md` → *Formatting defaults*): cards hide the label under the value
   (the title already names it) and set display units explicitly (counts whole, amounts in millions);

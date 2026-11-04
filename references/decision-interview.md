@@ -247,6 +247,14 @@ have (returns, targets, profit without cost).
   all-status value shown separately and named "order value" · B all statuses (gross) · C completed only.
 - Recommend A, and compare targets with the same definition. In a test dataset Cancelled + Returned were
   40 % of the amount – including them would have reported 2.5× the real revenue.
+- **Classify every status from its definition, not its name.** Read the data dictionary (or the
+  source's documentation) for each status and put it in one of: revenue · open · not revenue.
+  A name like "Confirmed" can mean "booked, not yet stayed" (open) or "stayed and invoiced" (revenue).
+  If the definition is missing or ambiguous, mark the status **"uklar"** (unclear) in the decision log,
+  with the reason and its row count and amount, and ask the user. In an unattended run, pick the
+  class the definition points to most, and report revenue both with and without the unclear status.
+  In a hotel test dataset, misclassifying "Confirmed" moved revenue by 21.6 million.
+- Log the mapping as a table: `| Status | Definition (source) | Class | Rows | Amount |`.
 
 ### Round 4 – before hand-over
 

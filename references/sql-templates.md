@@ -221,7 +221,9 @@ order by table_schema, table_name;
 ## 4. Silver procedure
 
 Create the silver tables with clean types first (same columns, `date` instead of integer dates, plus
-an optional `dwh_create_date timestamptz default now()`). Then:
+an optional `dwh_create_date timestamptz default now()`). Intermediate steps go in named staging
+tables (`silver.stg_<name>`, truncated at the start) or subqueries – never `create temp table` inside
+the procedure (see *Dedupe by quality score*). Then:
 
 ```sql
 create or replace procedure silver.load_silver()
@@ -339,8 +341,14 @@ Gold then sets `revenue = case when amount_issue = 'ok' then amount end`, keepin
 
 ### Dedupe by quality score (decision R2-5, no timestamp)
 
+Use a named staging table, not `create temp table … on commit drop`: a temp table inside the procedure
+hides the step from lineage tools and fails when the procedure runs twice in one transaction.
+
 ```sql
-create temporary table tmp_orders on commit drop as
+-- once, next to the other silver tables:
+--   create table silver.stg_orders (like parsed_orders, quality_score int, rn int, versions int);
+truncate silver.stg_orders;
+insert into silver.stg_orders
 select s.*,
        row_number() over (partition by order_no order by quality_score desc, source_line) as rn,
        count(*)     over (partition by order_no)                                        as versions
@@ -352,7 +360,7 @@ from (
   from parsed_orders p
 ) s;
 
-insert into silver.orders select ... from tmp_orders where rn = 1;
+insert into silver.orders select ... from silver.stg_orders where rn = 1;
 
 -- Keep the evidence: one row per removed version and why it differed
 insert into silver.order_duplicates_removed (source_line, order_no, kept_source_line, duplicate_type)
@@ -360,7 +368,7 @@ select d.source_line, d.order_no, k.source_line,
        case when d.row_hash = k.row_hash then 'identical'
             when d.amount is not distinct from k.amount then 'same amount, other date/fields'
             else 'different amount' end
-from tmp_orders d join tmp_orders k on k.order_no = d.order_no and k.rn = 1
+from silver.stg_orders d join silver.stg_orders k on k.order_no = d.order_no and k.rn = 1
 where d.rn > 1;
 ```
 
@@ -581,20 +589,21 @@ customers = the expected orphan count (computed on silver, after dedupe).
 create table if not exists gold.bridge_customer_rep (
     customer_key int not null references gold.dim_customer (customer_key),
     rep_key      int not null references gold.dim_rep (rep_key),
-    allocation   numeric(6,5) not null,              -- 1 / reps per customer
+    allocation   numeric not null,                   -- 1 / reps per customer, not rounded
     primary key (customer_key, rep_key)
 );
 
 insert into gold.bridge_customer_rep
-select c.customer_key, r.rep_key, round(1.0 / count(*) over (partition by c.customer_key), 5)
+select c.customer_key, r.rep_key, 1.0 / count(*) over (partition by c.customer_key)
 from (select distinct customer_no, rep_no from silver.customer_rep) b     -- the source had duplicate pairs
 join gold.dim_customer c on c.customer_no = b.customer_no
 join gold.dim_rep      r on r.rep_no      = b.rep_no;
 ```
 
 Tests: `select customer_key from gold.bridge_customer_rep group by 1 having abs(sum(allocation) - 1) > 0.0001` → 0 rows;
-allocated total = revenue of customers that have a rep (rounding of 1/3 leaves a few hundred out of
-hundreds of millions). DAX: `tmdl-templates.md` → *Bridge measures*.
+allocated total = revenue of customers that have a rep, within a tolerance of 1 currency unit. Do not
+round the allocation: `numeric(6,5)` with `round(…, 5)` left 56 DKK unallocated in a test dataset.
+Unrounded `numeric` keeps the sum exact enough. DAX: `tmdl-templates.md` → *Bridge measures*.
 
 ## 6. Quality checks (expect 0 everywhere)
 
@@ -640,6 +649,25 @@ Two traps when writing checks and summary tables:
 
 A `data_quality` table in gold (one row per rule: rows affected, amount affected, handling) gives the
 report a data-quality page that explains every difference between source and model.
+
+### `docs/quality-results.md` (fixed format)
+
+Write the output of the checks above to this file, one row per check, numbered in query order.
+`ERR` = must be 0; `INFO` = accepted exception, with the decision id that accepts it.
+
+```markdown
+# Quality results – <schema prefix>, <date>
+
+| # | Type | Check | Result |
+|---|------|-------|--------|
+| 1 | ERR  | dim_customers: duplicate key | 0 |
+| 2 | ERR  | fact_sales: orphan customer_key | 0 |
+| 7 | INFO | fact rows without order_date | 19 (R2-2) |
+
+ERR total: 0 · INFO rows: 1
+```
+
+Keep the column names and order. Tools and later runs parse the table, so do not add columns.
 
 ## 7. Security (read-only role, RLS)
 

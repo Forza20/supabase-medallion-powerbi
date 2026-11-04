@@ -342,6 +342,10 @@ relationship 00000000-0000-0000-0000-000000000034
 
 ## 8. Measure table and measures
 
+The `///` descriptions below are in English. Write them in the **report language** when you copy them
+(Danish report → Danish descriptions, e.g. `/// Omsætning af gennemførte og afsendte ordrer.`). The
+same applies to column descriptions. They show as tooltips in the field list and in the data catalog.
+
 ```
 /// All measures. The column is a hidden placeholder required for a calculated table.
 table _Measures
@@ -649,6 +653,11 @@ string form (`'1000000'`), which works on card values, they ignore the setting a
 shows ("Net revenue per month (complete months only)").
 
 ## 11. Validation without Node
+
+**Model first, if `powerbi-modeling-mcp` is available:** `connection_operations` → `ConnectFolder` on
+`<Name>.SemanticModel/definition`. If it connects, the TMDL parses. After changes made through the
+server, `ExportToTmdlFolder`, then connect again. DAX queries (`dax_query_operations`) need a running
+Power BI Desktop with the model open; offline they fail, so do not count that as a model error.
 
 When no PBIR tool can run, check at least that every file parses and that every field a visual uses
 exists in the model (PowerShell):
