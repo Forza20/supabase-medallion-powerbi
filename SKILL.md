@@ -292,6 +292,11 @@ Then finish with:
 5. A table of expected values per visual (from SQL on gold), so the user can check the report against
    it. In chat, give file links relative to the workspace root, plus the full path for files the user
    opens outside the editor.
+6. **An overview page** `docs/overview.html`: sources → landing → bronze → silver → gold → consumers, with
+   the four gates, the rows silver flagged, and the check/decision totals. Copy
+   `references/overview-template.html` and fill only its JSON block with numbers from this build (rules and
+   keys: `references/overview.md`). It is one file that opens in any browser; publish it as a page when the
+   session can, and give the user the path or link.
 
 ## When something goes wrong
 
@@ -313,3 +318,5 @@ tiles, full disks). Two general rules:
 - `references/tmdl-templates.md` – PBIP layout, parameters, partitions, date table (incl. complete-month
   flag), measure table, measures, relationships, minimal report.
 - `references/troubleshooting.md` – error → cause → fix.
+- `references/overview.md` + `references/overview-template.html` – the hand-over overview page (Phase 9):
+  what each gate means, the JSON keys, where every number comes from.
