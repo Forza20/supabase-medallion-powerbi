@@ -348,15 +348,19 @@ hides the step from lineage tools and fails when the procedure runs twice in one
 -- once, next to the other silver tables:
 --   create table silver.stg_orders (like parsed_orders, quality_score int, rn int, versions int);
 truncate silver.stg_orders;
-insert into silver.stg_orders
-select s.*,
-       row_number() over (partition by order_no order by quality_score desc, source_line) as rn,
-       count(*)     over (partition by order_no)                                        as versions
+-- List every column (no p.* / s.*), so lineage tools can follow each one back to bronze.
+insert into silver.stg_orders (source_line, order_no, order_date, ship_date, quantity, amount,
+                               order_date_status, amount_issue, quality_score, rn, versions)
+select s.source_line, s.order_no, s.order_date, s.ship_date, s.quantity, s.amount,
+       s.order_date_status, s.amount_issue, s.quality_score,
+       row_number() over (partition by s.order_no order by s.quality_score desc, s.source_line) as rn,
+       count(*)     over (partition by s.order_no)                                            as versions
 from (
-  select p.*,
-         (order_date_status = 'ok')::int + (amount_issue = 'ok')::int
-         + (order_date is null or ship_date is null or ship_date >= order_date)::int
-         + (quantity is not null)::int as quality_score
+  select p.source_line, p.order_no, p.order_date, p.ship_date, p.quantity, p.amount,
+         p.order_date_status, p.amount_issue,
+         (p.order_date_status = 'ok')::int + (p.amount_issue = 'ok')::int
+         + (p.order_date is null or p.ship_date is null or p.ship_date >= p.order_date)::int
+         + (p.quantity is not null)::int as quality_score
   from parsed_orders p
 ) s;
 
