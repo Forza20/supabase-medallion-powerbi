@@ -156,6 +156,9 @@ Typical transformations (patterns in `references/sql-templates.md` → *Silver*)
   second call in the same transaction. Use a named staging table in silver (`silver.stg_<name>`,
   truncated at the start of the load) or a subquery. Temp tables are fine only in ad-hoc load scripts
   (Phase 1, `\copy` with RLS).
+- **No `*` in silver and gold inserts.** Write an explicit column list on both sides, also inside
+  subqueries (`insert into silver.x (a, b) select s.a, s.b from (select t.a, … ) s`). `s.*` / `a.*`
+  hides which source column feeds which target, so lineage tools stop there.
 - **Wide files** (one column per month) are unpivoted to long rows in silver with
   `cross join lateral (values …)`; empty cells are dropped, not turned into zeros.
 
