@@ -14,6 +14,7 @@ description: >
 compatibility: >
   Supabase project (SQL Editor, Table Editor or the Supabase MCP server), Power BI Desktop on Windows,
   optional psql. Works with any CSV source; examples use a CRM/ERP sales dataset.
+disable-model-invocation: true
 ---
 
 # Supabase medallion → Power BI (PBIP/TMDL)
